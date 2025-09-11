@@ -2,12 +2,21 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from plotly.subplots import make_subplots
 import numpy as np
+from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
+from neo4j import GraphDatabase
+import time
+import logging
+
+# Ladda miljövariabler från .env-filen
+load_dotenv()
 
 # Configure the page
 st.set_page_config(
-    page_title="SHL Hockey Stats",
+    page_title="SHL Hockey Stats - Neo4j Live",
     page_icon="🏒",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -37,435 +46,777 @@ st.markdown("""
         padding-left: 20px;
         padding-right: 20px;
     }
+    .connection-status {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 0.5rem 1rem;
+        border-radius: 5px;
+        border: 1px solid #c3e6cb;
+        margin-bottom: 1rem;
+    }
+    .error-status {
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 0.5rem 1rem;
+        border-radius: 5px;
+        border: 1px solid #f5c6cb;
+        margin-bottom: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-def get_competitions():
-    """Get available competitions from the database"""
-    # This would normally use the MCP tools, but for demo purposes returning static data
-    return ["SHL"]
-
-def get_seasons():
-    """Get available seasons from the database"""
-    # This would normally use the MCP tools, but for demo purposes returning static data
-    return ["2023/2024", "2024/2025"]
-
-def get_teams():
-    """Get all teams from the database"""
-    # This would normally use the MCP tools, but for demo purposes returning static data
-    teams = [
-        {"name": "Linköping HC", "shortName": "LHC"},
-        {"name": "Örebro HK", "shortName": "ÖHK"},
-        {"name": "Brynäs IF", "shortName": "BIF"},
-        {"name": "Färjestad BK", "shortName": "FBK"},
-        {"name": "Växjö Lakers HC", "shortName": "VÄX"},
-        {"name": "Skellefteå AIK", "shortName": "SKE"},
-        {"name": "Luleå HF", "shortName": "LHF"},
-        {"name": "IF Malmö Redhawks", "shortName": "MIF"},
-        {"name": "Frölunda HC", "shortName": "FHC"},
-        {"name": "HV 71", "shortName": "HV71"}
-    ]
-    return teams
+class Neo4jHockeyDatabase:
+    """Direct Neo4j database connection for hockey statistics"""
+    
+    def __init__(self):
+        """Initialize Neo4j connection"""
+        self.uri = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
+        self.user = os.getenv('NEO4J_USER', 'neo4j')
+        self.password = os.getenv('NEO4J_PASSWORD', '')
+        
+        self.driver = None
+        self.connected = False
+        
+        try:
+            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+            # Test connection
+            with self.driver.session() as session:
+                session.run("RETURN 1")
+            self.connected = True
+        except Exception as e:
+            st.error(f"❌ Kunde inte ansluta till Neo4j databas: {e}")
+            st.info("🔧 Kontrollera din .env fil med rätt NEO4J_URI, NEO4J_USER och NEO4J_PASSWORD")
+    
+    def close(self):
+        """Close the database connection"""
+        if self.driver:
+            self.driver.close()
+    
+    def execute_query(self, query, parameters=None):
+        """Execute a Cypher query and return results"""
+        if not self.connected:
+            return []
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(query, parameters or {})
+                return [record.data() for record in result]
+        except Exception as e:
+            st.error(f"Databasfel: {e}")
+            return []
+    
+    @st.cache_data(ttl=600)
+    def get_competitions(_self):
+        """Get available competitions from database"""
+        query = "MATCH (c:Competition) RETURN c.name AS competition ORDER BY c.name"
+        results = _self.execute_query(query)
+        return [record['competition'] for record in results] if results else ["SHL"]
+    
+    @st.cache_data(ttl=600)
+    def get_seasons(_self):
+        """Get available seasons from database"""
+        query = "MATCH (s:Season) RETURN s.name AS season ORDER BY s.name DESC"
+        results = _self.execute_query(query)
+        return [record['season'] for record in results] if results else ["2024/2025", "2023/2024"]
+    
+    @st.cache_data(ttl=600)
+    def get_teams(_self):
+        """Get all teams from database"""
+        query = """
+        MATCH (t:Team) 
+        RETURN t.name AS name, t.shortName AS shortName 
+        ORDER BY t.name
+        """
+        results = _self.execute_query(query)
+        return results if results else [
+            {"name": "Frölunda HC", "shortName": "FHC"},
+            {"name": "Skellefteå AIK", "shortName": "SKE"}
+        ]
+    
+    @st.cache_data(ttl=300)
+    def get_standings(_self, competition, season):
+        """Get current standings for competition and season"""
+        query = """
+        MATCH (t:Team)-[rel:PLAYED]->(g:Game)-[:PART_OF]->(s:Season {name: $season})
+        MATCH (s)-[:PART_OF]->(c:Competition {name: $competition})
+        RETURN t.name AS team,
+               count(g) AS games,
+               sum(CASE WHEN rel.result = 'W' THEN 1 ELSE 0 END) AS wins,
+               sum(CASE WHEN rel.result = 'L' THEN 1 ELSE 0 END) AS losses,
+               sum(rel.goalsFor) AS goals_for,
+               sum(rel.goalsAgainst) AS goals_against,
+               sum(rel.points) AS points
+        ORDER BY points DESC, goals_for DESC
+        """
+        results = _self.execute_query(query, {"season": season, "competition": competition})
+        return results if results else []
+    
+    @st.cache_data(ttl=300)
+    def get_top_scorers(_self, competition, season, limit=10):
+        """Get top goal scorers"""
+        query = """
+        MATCH (p:Player)-[:SCORED]->(g:Goal)-[:IN_GAME]->(game:Game)-[:PART_OF]->(s:Season {name: $season})
+        MATCH (s)-[:PART_OF]->(c:Competition {name: $competition})
+        MATCH (p)-[:PLAYS_FOR]->(t:Team)
+        RETURN p.firstName + ' ' + p.lastName AS player, 
+               t.name AS team, 
+               count(g) AS goals,
+               count(DISTINCT game) AS games
+        ORDER BY goals DESC, games ASC
+        LIMIT $limit
+        """
+        results = _self.execute_query(query, {"season": season, "competition": competition, "limit": limit})
+        return results if results else []
+    
+    @st.cache_data(ttl=300)
+    def get_top_assists(_self, competition, season, limit=10):
+        """Get top assist providers"""
+        query = """
+        MATCH (p:Player)-[:ASSISTED_IN]->(g:Goal)-[:IN_GAME]->(game:Game)-[:PART_OF]->(s:Season {name: $season})
+        MATCH (s)-[:PART_OF]->(c:Competition {name: $competition})
+        MATCH (p)-[:PLAYS_FOR]->(t:Team)
+        RETURN p.firstName + ' ' + p.lastName AS player, 
+               t.name AS team, 
+               count(g) AS assists,
+               count(DISTINCT game) AS games
+        ORDER BY assists DESC, games ASC
+        LIMIT $limit
+        """
+        results = _self.execute_query(query, {"season": season, "competition": competition, "limit": limit})
+        return results if results else []
+    
+    @st.cache_data(ttl=300)
+    def get_penalty_leaders(_self, competition, season, limit=10):
+        """Get most penalized players"""
+        query = """
+        MATCH (p:Player)-[:COMMITTED]->(pen:Penalty)-[:IN_GAME]->(game:Game)-[:PART_OF]->(s:Season {name: $season})
+        MATCH (s)-[:PART_OF]->(c:Competition {name: $competition})
+        MATCH (p)-[:PLAYS_FOR]->(t:Team)
+        RETURN p.firstName + ' ' + p.lastName AS player, 
+               t.name AS team, 
+               count(pen) AS penalties,
+               sum(pen.minutes) AS penalty_minutes,
+               count(DISTINCT game) AS games
+        ORDER BY penalties DESC, penalty_minutes DESC
+        LIMIT $limit
+        """
+        results = _self.execute_query(query, {"season": season, "competition": competition, "limit": limit})
+        return results if results else []
+    
+    @st.cache_data(ttl=300)
+    def get_recent_games(_self, competition, season, limit=15):
+        """Get recent games"""
+        query = """
+        MATCH (g:Game)-[:PART_OF]->(s:Season {name: $season})
+        MATCH (s)-[:PART_OF]->(c:Competition {name: $competition})
+        RETURN g.date AS date, 
+               g.homeTeam AS home_team, 
+               g.awayTeam AS away_team, 
+               g.score AS score,
+               g.spectators AS spectators,
+               g.title AS title
+        ORDER BY g.date DESC
+        LIMIT $limit
+        """
+        results = _self.execute_query(query, {"season": season, "competition": competition, "limit": limit})
+        return results if results else []
+    
+    @st.cache_data(ttl=300)
+    def get_team_stats(_self, team_name, competition, season):
+        """Get detailed team statistics"""
+        query = """
+        MATCH (t:Team {name: $team_name})-[rel:PLAYED]->(g:Game)-[:PART_OF]->(s:Season {name: $season})
+        MATCH (s)-[:PART_OF]->(c:Competition {name: $competition})
+        RETURN count(g) AS games,
+               sum(CASE WHEN rel.result = 'W' THEN 1 ELSE 0 END) AS wins,
+               sum(CASE WHEN rel.result = 'L' THEN 1 ELSE 0 END) AS losses,
+               sum(rel.goalsFor) AS goals_for,
+               sum(rel.goalsAgainst) AS goals_against,
+               sum(rel.points) AS points,
+               avg(rel.goalsFor) AS avg_goals_for,
+               avg(rel.goalsAgainst) AS avg_goals_against
+        """
+        results = _self.execute_query(query, {"team_name": team_name, "season": season, "competition": competition})
+        return results[0] if results else {}
+    
+    def get_database_info(self):
+        """Get general database information"""
+        queries = {
+            "teams": "MATCH (t:Team) RETURN count(t) AS count",
+            "players": "MATCH (p:Player) RETURN count(p) AS count",
+            "games": "MATCH (g:Game) RETURN count(g) AS count",
+            "goals": "MATCH (goal:Goal) RETURN count(goal) AS count",
+            "penalties": "MATCH (pen:Penalty) RETURN count(pen) AS count"
+        }
+        
+        info = {}
+        for key, query in queries.items():
+            result = self.execute_query(query)
+            info[key] = result[0]['count'] if result else 0
+        
+        return info
 
 def main():
+    """Main application function"""
+    
+    # Initialize database connection
+    db = Neo4jHockeyDatabase()
+    
     # Header
-    st.markdown('<h1 class="main-header">🏒 SHL Hockey Statistics Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🏒 SHL Hockey Statistics - Live Neo4j Data</h1>', unsafe_allow_html=True)
+    
+    # Connection status
+    if db.connected:
+        st.markdown('<div class="connection-status">🔗 Ansluten till Neo4j databas</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="error-status">❌ Ingen databasanslutning</div>', unsafe_allow_html=True)
+        st.stop()
     
     # Sidebar for filters
-    st.sidebar.header("🔧 Filters")
+    st.sidebar.header("🔧 Filter")
     
     # Get data for filters
-    competitions = get_competitions()
-    seasons = get_seasons()
-    teams = get_teams()
+    competitions = db.get_competitions()
+    seasons = db.get_seasons()
+    teams = db.get_teams()
     
     # Filter controls
-    selected_competition = st.sidebar.selectbox("Competition", competitions, index=0)
-    selected_season = st.sidebar.selectbox("Season", seasons, index=len(seasons)-1)
+    selected_competition = st.sidebar.selectbox("Tävling", competitions, index=0)
+    selected_season = st.sidebar.selectbox("Säsong", seasons, index=0)
+    
+    # Display current selection
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"**Aktuellt val:**")
+    st.sidebar.markdown(f"🏆 {selected_competition}")
+    st.sidebar.markdown(f"📅 {selected_season}")
+    
+    # Database info
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Databasinfo:**")
+    db_info = db.get_database_info()
+    if db_info:
+        st.sidebar.markdown(f"🏒 {db_info.get('teams', 0)} lag")
+        st.sidebar.markdown(f"👤 {db_info.get('players', 0)} spelare")
+        st.sidebar.markdown(f"🎮 {db_info.get('games', 0)} matcher")
+        st.sidebar.markdown(f"⚽ {db_info.get('goals', 0)} mål")
+        st.sidebar.markdown(f"⚠️ {db_info.get('penalties', 0)} utvisningar")
+    
+    # Cache controls
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🔄 Uppdatera cache"):
+        st.cache_data.clear()
+        st.success("Cache uppdaterad!")
+        st.rerun()
     
     # Main content tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🏆 Teams", "👤 Players", "🏒 Games", "📈 Analysis"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🏆 Lag", "👤 Spelare", "🏒 Matcher", "🔍 Frågor"])
     
     with tab1:
-        show_dashboard(selected_competition, selected_season)
+        show_dashboard(db, selected_competition, selected_season)
     
     with tab2:
-        show_teams(selected_competition, selected_season, teams)
+        show_teams(db, selected_competition, selected_season, teams)
     
     with tab3:
-        show_players(selected_competition, selected_season)
+        show_players(db, selected_competition, selected_season)
     
     with tab4:
-        show_games(selected_competition, selected_season)
+        show_games(db, selected_competition, selected_season)
     
     with tab5:
-        show_analysis(selected_competition, selected_season)
+        show_custom_queries(db, selected_competition, selected_season)
+    
+    # Clean up
+    db.close()
 
-def show_dashboard(competition, season):
-    """Display the main dashboard with key statistics"""
-    st.header(f"📊 {competition} {season} Overview")
+def show_dashboard(db, competition, season):
+    """Display main dashboard with live data"""
+    st.header(f"📊 {competition} {season} Dashboard")
     
-    # Key metrics row
-    col1, col2, col3, col4 = st.columns(4)
+    # Get standings for calculations
+    standings = db.get_standings(competition, season)
     
-    with col1:
-        st.metric(
-            label="Total Games",
-            value="456",
-            delta="12 this week"
-        )
-    
-    with col2:
-        st.metric(
-            label="Total Goals",
-            value="2,847",
-            delta="89 this week"
-        )
-    
-    with col3:
-        st.metric(
-            label="Average Goals/Game",
-            value="6.24",
-            delta="0.12"
-        )
-    
-    with col4:
-        st.metric(
-            label="Active Players",
-            value="532",
-            delta="-3"
-        )
-    
-    st.markdown("---")
-    
-    # Charts row
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Goals per Game Trend")
-        # Sample data for demonstration
-        dates = pd.date_range('2024-09-01', periods=30, freq='D')
-        goals = np.random.poisson(6.2, 30)
+    if standings:
+        df = pd.DataFrame(standings)
         
-        fig = px.line(
-            x=dates,
-            y=goals,
-            title="Daily Goals Scored",
-            labels={'x': 'Date', 'y': 'Goals'}
-        )
-        fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        st.subheader("Top Scoring Teams")
-        # Sample data
-        teams = ["Frölunda HC", "Skellefteå AIK", "Växjö Lakers", "Färjestad BK", "Luleå HF"]
-        goals = [156, 143, 139, 132, 128]
+        # Calculate metrics
+        total_teams = len(df)
+        total_games = df['games'].sum()
+        total_goals = df['goals_for'].sum()
+        avg_goals_per_game = total_goals / total_games if total_games > 0 else 0
         
-        fig = px.bar(
-            x=goals,
-            y=teams,
-            orientation='h',
-            title="Goals Scored This Season",
-            labels={'x': 'Goals', 'y': 'Team'}
-        )
-        fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        # Key metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("🏒 Lag", total_teams)
+        
+        with col2:
+            st.metric("🎮 Totalt matcher", f"{total_games:,}")
+        
+        with col3:
+            st.metric("⚽ Totalt mål", f"{total_goals:,}")
+        
+        with col4:
+            st.metric("📈 Snitt mål/match", f"{avg_goals_per_game:.2f}")
+        
+        st.markdown("---")
+        
+        # Charts
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🥅 Bästa målskyttelagen")
+            top_teams = df.head(6)
+            fig = px.bar(
+                x=top_teams['goals_for'],
+                y=top_teams['team'],
+                orientation='h',
+                title="Mål gjorda denna säsong",
+                labels={'x': 'Mål', 'y': 'Lag'}
+            )
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("🏆 Poängtabell (topp 6)")
+            standings_table = top_teams[['team', 'points', 'wins', 'losses', 'goals_for', 'goals_against']]
+            standings_table.columns = ['Lag', 'Poäng', 'Vinster', 'Förluster', 'Mål för', 'Mål emot']
+            st.dataframe(standings_table, use_container_width=True, hide_index=True)
+    
+    else:
+        st.warning("⚠️ Ingen data tillgänglig för valda tävling och säsong.")
 
-def show_teams(competition, season, teams):
-    """Display team statistics and standings"""
-    st.header(f"🏆 {competition} {season} Team Statistics")
+def show_teams(db, competition, season, teams):
+    """Display team statistics"""
+    st.header(f"🏆 {competition} {season} Lagstatistik")
     
     # Team selector
-    team_names = [team["name"] for team in teams]
-    selected_team = st.selectbox("Select a team for detailed stats:", ["All Teams"] + team_names)
+    team_options = ["📊 Alla lag (Tabell)"] + [f"🏒 {team['name']}" for team in teams]
+    selected_option = st.selectbox("Välj vy:", team_options)
     
-    if selected_team == "All Teams":
-        show_standings(competition, season)
+    if selected_option == "📊 Alla lag (Tabell)":
+        show_standings(db, competition, season)
     else:
-        show_team_details(selected_team, competition, season)
+        team_name = selected_option.replace("🏒 ", "")
+        show_team_details(db, team_name, competition, season)
 
-def show_standings(competition, season):
-    """Display league standings"""
-    st.subheader("Current Standings")
+def show_standings(db, competition, season):
+    """Display full standings table"""
+    st.subheader("📊 Fullständig tabell")
     
-    # Sample standings data
-    standings_data = {
-        "Position": range(1, 11),
-        "Team": ["Frölunda HC", "Skellefteå AIK", "Växjö Lakers", "Färjestad BK", "Luleå HF",
-                "Linköping HC", "HV 71", "Brynäs IF", "Örebro HK", "IF Malmö Redhawks"],
-        "Games": [25, 24, 25, 24, 25, 24, 25, 24, 25, 24],
-        "Wins": [18, 17, 16, 15, 14, 12, 11, 9, 8, 6],
-        "Losses": [7, 7, 9, 9, 11, 12, 14, 15, 17, 18],
-        "Goals For": [156, 143, 139, 132, 128, 118, 112, 98, 89, 82],
-        "Goals Against": [98, 103, 112, 118, 125, 134, 142, 156, 167, 178],
-        "Goal Diff": [58, 40, 27, 14, 3, -16, -30, -58, -78, -96],
-        "Points": [54, 51, 48, 45, 42, 36, 33, 27, 24, 18]
-    }
+    standings = db.get_standings(competition, season)
     
-    df_standings = pd.DataFrame(standings_data)
+    if standings:
+        df = pd.DataFrame(standings)
+        
+        # Add calculated columns
+        df['position'] = range(1, len(df) + 1)
+        df['goal_diff'] = df['goals_for'] - df['goals_against']
+        df['points_per_game'] = (df['points'] / df['games']).round(2)
+        df['win_percentage'] = (df['wins'] / df['games'] * 100).round(1)
+        
+        # Prepare display
+        display_df = df[['position', 'team', 'games', 'wins', 'losses', 
+                        'goals_for', 'goals_against', 'goal_diff', 'points', 
+                        'points_per_game', 'win_percentage']].copy()
+        
+        display_df.columns = ['Pos', 'Lag', 'M', 'V', 'F', 'GM', 'IM', 'MS', 'P', 'P/M', 'V%']
+        
+        # Style based on position
+        def highlight_positions(row):
+            if row['Pos'] <= 6:  # Playoff positions
+                return ['background-color: #d4edda'] * len(row)
+            elif row['Pos'] >= len(display_df) - 1:  # Bottom 2
+                return ['background-color: #f8d7da'] * len(row)
+            else:
+                return [''] * len(row)
+        
+        # Apply styling without matplotlib dependency
+        try:
+            styled_df = display_df.style.apply(highlight_positions, axis=1)
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        except:
+            # Fallback without styling if matplotlib is not available
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # League insights
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.subheader("🥇 Ligaledare")
+            leader = df.iloc[0]
+            st.markdown(f"**Flest poäng:** {leader['team']} ({leader['points']} p)")
+            
+            best_offense = df.loc[df['goals_for'].idxmax()]
+            st.markdown(f"**Bästa anfall:** {best_offense['team']} ({best_offense['goals_for']} mål)")
+            
+            best_defense = df.loc[df['goals_against'].idxmin()]
+            st.markdown(f"**Bästa försvar:** {best_defense['team']} ({best_defense['goals_against']} insläppta)")
+        
+        with col2:
+            st.subheader("📊 Genomsnitt")
+            st.markdown(f"**Snitt poäng:** {df['points'].mean():.1f}")
+            st.markdown(f"**Snitt mål för:** {df['goals_for'].mean():.1f}")
+            st.markdown(f"**Snitt mål emot:** {df['goals_against'].mean():.1f}")
+        
+        with col3:
+            st.subheader("🎯 Spännande fakta")
+            if len(df) >= 2:
+                gap = df.iloc[0]['points'] - df.iloc[1]['points']
+                st.markdown(f"**Ledargap:** {gap} poäng")
+                
+                # Playoff line analysis
+                if len(df) >= 6:
+                    playoff_gap = df.iloc[5]['points'] - df.iloc[6]['points'] if len(df) > 6 else 0
+                    st.markdown(f"**Slutspelsstrid:** {playoff_gap} poäng gap")
     
-    # Style the dataframe
-    styled_df = df_standings.style.format({
-        'Goal Diff': lambda x: f"+{x}" if x > 0 else str(x)
-    }).background_gradient(subset=['Points'], cmap='RdYlGn')
-    
-    st.dataframe(styled_df, use_container_width=True)
+    else:
+        st.error("❌ Kunde inte ladda tabelldata")
 
-def show_team_details(team_name, competition, season):
-    """Display detailed statistics for a specific team"""
-    st.subheader(f"{team_name} - Detailed Statistics")
+def show_team_details(db, team_name, competition, season):
+    """Display individual team details"""
+    st.subheader(f"🏒 {team_name}")
     
-    col1, col2, col3 = st.columns(3)
+    team_stats = db.get_team_stats(team_name, competition, season)
     
-    with col1:
-        st.metric("Games Played", "25")
-        st.metric("Wins", "16")
-        st.metric("Losses", "9")
+    if team_stats and team_stats.get('games', 0) > 0:
+        # Calculate additional metrics
+        goal_diff = team_stats['goals_for'] - team_stats['goals_against']
+        ppg = team_stats['points'] / team_stats['games']
+        win_pct = team_stats['wins'] / team_stats['games'] * 100
+        
+        # Display metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Spelade matcher", team_stats['games'])
+            st.metric("Vinster", team_stats['wins'])
+        
+        with col2:
+            st.metric("Förluster", team_stats['losses'])
+            st.metric("Poäng", team_stats['points'])
+        
+        with col3:
+            st.metric("Mål för", team_stats['goals_for'])
+            st.metric("Mål emot", team_stats['goals_against'])
+        
+        with col4:
+            st.metric("Målskillnad", f"+{goal_diff}" if goal_diff >= 0 else str(goal_diff))
+            st.metric("Poäng/match", f"{ppg:.2f}")
+        
+        # Performance charts
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Vinst/Förlust fördelning")
+            fig = px.pie(
+                values=[team_stats['wins'], team_stats['losses']],
+                names=['Vinster', 'Förluster'],
+                title="Matchresultat"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("⚽ Mål jämförelse")
+            fig = px.bar(
+                x=['Mål för', 'Mål emot'],
+                y=[team_stats['goals_for'], team_stats['goals_against']],
+                title="Offensiv vs Defensiv"
+            )
+            st.plotly_chart(fig, use_container_width=True)
     
-    with col2:
-        st.metric("Goals For", "139")
-        st.metric("Goals Against", "112")
-        st.metric("Goal Difference", "+27")
-    
-    with col3:
-        st.metric("Points", "48")
-        st.metric("Position", "3rd")
-        st.metric("Points/Game", "1.92")
-    
-    # Recent form chart
-    st.subheader("Recent Form (Last 10 Games)")
-    recent_results = ["W", "W", "L", "W", "W", "L", "W", "W", "W", "L"]
-    colors = ["green" if x == "W" else "red" for x in recent_results]
-    
-    fig = go.Figure(data=go.Bar(
-        x=list(range(1, 11)),
-        y=[1]*10,
-        marker_color=colors,
-        text=recent_results,
-        textposition="middle center"
-    ))
-    fig.update_layout(
-        title="Recent Results",
-        xaxis_title="Game",
-        yaxis_title="",
-        showlegend=False,
-        yaxis=dict(showticklabels=False)
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.error(f"❌ Kunde inte ladda statistik för {team_name}")
 
-def show_players(competition, season):
+def show_players(db, competition, season):
     """Display player statistics"""
-    st.header(f"👤 {competition} {season} Player Statistics")
+    st.header(f"👤 {competition} {season} Spelarstatistik")
     
     # Player stats tabs
-    ptab1, ptab2, ptab3 = st.tabs(["🥅 Top Scorers", "🎯 Assists Leaders", "⚠️ Penalty Leaders"])
+    tab1, tab2, tab3 = st.tabs(["🥅 Målskyttar", "🎯 Passningsgivare", "⚠️ Utvisningar"])
     
-    with ptab1:
-        show_top_scorers()
+    with tab1:
+        show_player_goals(db, competition, season)
     
-    with ptab2:
-        show_assists_leaders()
+    with tab2:
+        show_player_assists(db, competition, season)
     
-    with ptab3:
-        show_penalty_leaders()
+    with tab3:
+        show_player_penalties(db, competition, season)
 
-def show_top_scorers():
+def show_player_goals(db, competition, season):
     """Display top goal scorers"""
-    st.subheader("Leading Goal Scorers")
+    st.subheader("🥅 Bästa målskyttarna")
     
-    # Sample data
-    scorers_data = {
-        "Rank": range(1, 11),
-        "Player": ["Erik Gustafsson", "Lucas Raymond", "Alexander Holtz", "William Nylander", 
-                  "Filip Forsberg", "Mika Zibanejad", "Gabriel Landeskog", "Victor Hedman",
-                  "Elias Pettersson", "Rasmus Dahlin"],
-        "Team": ["Frölunda HC", "Skellefteå AIK", "Växjö Lakers", "Färjestad BK", "Luleå HF",
-                "Linköping HC", "HV 71", "Brynäs IF", "Örebro HK", "IF Malmö Redhawks"],
-        "Games": [25, 24, 25, 24, 25, 24, 25, 24, 25, 24],
-        "Goals": [23, 21, 19, 18, 17, 16, 15, 14, 13, 12],
-        "Goals/Game": [0.92, 0.88, 0.76, 0.75, 0.68, 0.67, 0.60, 0.58, 0.52, 0.50]
-    }
+    limit = st.slider("Antal spelare att visa:", 5, 50, 15)
     
-    df_scorers = pd.DataFrame(scorers_data)
-    st.dataframe(df_scorers, use_container_width=True)
+    scorers = db.get_top_scorers(competition, season, limit)
+    
+    if scorers:
+        df = pd.DataFrame(scorers)
+        df['rank'] = range(1, len(df) + 1)
+        df['goals_per_game'] = (df['goals'] / df['games']).round(2)
+        
+        # Display table
+        display_df = df[['rank', 'player', 'team', 'goals', 'games', 'goals_per_game']].copy()
+        display_df.columns = ['Rank', 'Spelare', 'Lag', 'Mål', 'Matcher', 'Mål/match']
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Top 10 chart
+        if len(df) >= 5:
+            st.subheader("📊 Topp 10 målskyttar")
+            top_10 = df.head(10)
+            fig = px.bar(
+                x=top_10['goals'],
+                y=top_10['player'],
+                orientation='h',
+                title="Mål denna säsong",
+                labels={'x': 'Mål', 'y': 'Spelare'}
+            )
+            fig.update_layout(showlegend=False, height=400)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    else:
+        st.warning("⚠️ Ingen målskytte-data tillgänglig")
 
-def show_assists_leaders():
-    """Display top assist leaders"""
-    st.subheader("Leading Assist Providers")
+def show_player_assists(db, competition, season):
+    """Display top assist providers"""
+    st.subheader("🎯 Bästa passningsgivarna")
     
-    # Sample data
-    assists_data = {
-        "Rank": range(1, 11),
-        "Player": ["Victor Hedman", "Erik Gustafsson", "Rasmus Dahlin", "Mika Zibanejad",
-                  "Gabriel Landeskog", "Lucas Raymond", "William Nylander", "Alexander Holtz",
-                  "Filip Forsberg", "Elias Pettersson"],
-        "Team": ["Brynäs IF", "Frölunda HC", "IF Malmö Redhawks", "Linköping HC", "HV 71",
-                "Skellefteå AIK", "Färjestad BK", "Växjö Lakers", "Luleå HF", "Örebro HK"],
-        "Games": [24, 25, 24, 24, 25, 24, 24, 25, 25, 25],
-        "Assists": [32, 29, 27, 25, 24, 23, 22, 21, 20, 19],
-        "Assists/Game": [1.33, 1.16, 1.13, 1.04, 0.96, 0.96, 0.92, 0.84, 0.80, 0.76]
-    }
+    limit = st.slider("Antal spelare att visa:", 5, 50, 15, key="assists_limit")
     
-    df_assists = pd.DataFrame(assists_data)
-    st.dataframe(df_assists, use_container_width=True)
+    assists = db.get_top_assists(competition, season, limit)
+    
+    if assists:
+        df = pd.DataFrame(assists)
+        df['rank'] = range(1, len(df) + 1)
+        df['assists_per_game'] = (df['assists'] / df['games']).round(2)
+        
+        # Display table
+        display_df = df[['rank', 'player', 'team', 'assists', 'games', 'assists_per_game']].copy()
+        display_df.columns = ['Rank', 'Spelare', 'Lag', 'Assist', 'Matcher', 'Assist/match']
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Top 10 chart
+        if len(df) >= 5:
+            st.subheader("📊 Topp 10 passningsgivare")
+            top_10 = df.head(10)
+            fig = px.bar(
+                x=top_10['assists'],
+                y=top_10['player'],
+                orientation='h',
+                title="Assists denna säsong",
+                labels={'x': 'Assists', 'y': 'Spelare'}
+            )
+            fig.update_layout(showlegend=False, height=400)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    else:
+        st.warning("⚠️ Ingen assist-data tillgänglig")
 
-def show_penalty_leaders():
+def show_player_penalties(db, competition, season):
     """Display penalty leaders"""
-    st.subheader("Most Penalized Players")
+    st.subheader("⚠️ Mest utvisade spelarna")
     
-    # Sample data
-    penalty_data = {
-        "Rank": range(1, 11),
-        "Player": ["Tom Wilson", "Brad Marchand", "Patrice Bergeron", "Connor McDavid",
-                  "Leon Draisaitl", "Nathan MacKinnon", "Auston Matthews", "Mikko Rantanen",
-                  "Sidney Crosby", "Alex Ovechkin"],
-        "Team": ["Brynäs IF", "Frölunda HC", "Skellefteå AIK", "Växjö Lakers", "Färjestad BK",
-                "Luleå HF", "Linköping HC", "HV 71", "Örebro HK", "IF Malmö Redhawks"],
-        "Games": [25, 24, 25, 24, 25, 24, 25, 24, 25, 24],
-        "Penalties": [45, 42, 38, 35, 33, 31, 29, 27, 25, 23],
-        "Penalty Minutes": [90, 84, 76, 70, 66, 62, 58, 54, 50, 46]
+    limit = st.slider("Antal spelare att visa:", 5, 50, 15, key="penalty_limit")
+    
+    penalties = db.get_penalty_leaders(competition, season, limit)
+    
+    if penalties:
+        df = pd.DataFrame(penalties)
+        df['rank'] = range(1, len(df) + 1)
+        df['penalties_per_game'] = (df['penalties'] / df['games']).round(2)
+        
+        # Display table
+        display_df = df[['rank', 'player', 'team', 'penalties', 'penalty_minutes', 'games', 'penalties_per_game']].copy()
+        display_df.columns = ['Rank', 'Spelare', 'Lag', 'Utvisningar', 'Utv.min', 'Matcher', 'Utv/match']
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Top 10 chart
+        if len(df) >= 5:
+            st.subheader("📊 Topp 10 mest utvisade")
+            top_10 = df.head(10)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig = px.bar(
+                    x=top_10['penalties'],
+                    y=top_10['player'],
+                    orientation='h',
+                    title="Antal utvisningar",
+                    labels={'x': 'Utvisningar', 'y': 'Spelare'}
+                )
+                fig.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                fig = px.bar(
+                    x=top_10['penalty_minutes'],
+                    y=top_10['player'],
+                    orientation='h',
+                    title="Utvisningsminuter",
+                    labels={'x': 'Minuter', 'y': 'Spelare'}
+                )
+                fig.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig, use_container_width=True)
+    
+    else:
+        st.warning("⚠️ Ingen utvisnings-data tillgänglig")
+
+def show_games(db, competition, season):
+    """Display recent games"""
+    st.header(f"🏒 {competition} {season} Matcher")
+    
+    limit = st.slider("Antal matcher att visa:", 5, 50, 20)
+    
+    games = db.get_recent_games(competition, season, limit)
+    
+    if games:
+        df = pd.DataFrame(games)
+        
+        # Format the display
+        display_df = df[['date', 'home_team', 'away_team', 'score', 'spectators']].copy()
+        display_df.columns = ['Datum', 'Hemmalag', 'Bortalag', 'Resultat', 'Åskådare']
+        
+        # Format attendance
+        if 'spectators' in df.columns:
+            display_df['Åskådare'] = display_df['Åskådare'].apply(
+                lambda x: f"{int(x):,}" if pd.notnull(x) and x != 0 else "N/A"
+            )
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Game statistics
+        if len(df) > 0:
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("📊 Matchstatistik")
+                total_games = len(df)
+                st.metric("Visade matcher", total_games)
+                
+                if 'spectators' in df.columns:
+                    valid_attendance = df['spectators'].dropna()
+                    valid_attendance = valid_attendance[valid_attendance > 0]
+                    if len(valid_attendance) > 0:
+                        avg_attendance = valid_attendance.mean()
+                        max_attendance = valid_attendance.max()
+                        st.metric("Snitt åskådare", f"{avg_attendance:,.0f}")
+                        st.metric("Högsta åskådarantal", f"{max_attendance:,}")
+            
+            with col2:
+                st.subheader("⚽ Målstatistik")
+                if 'score' in df.columns:
+                    try:
+                        # Parse scores to calculate goal statistics
+                        scores = df['score'].str.split('-', expand=True)
+                        if len(scores.columns) >= 2:
+                            scores = scores.astype(int)
+                            total_goals = scores.sum().sum()
+                            avg_goals = total_goals / len(df)
+                            highest_score = df.loc[scores.sum(axis=1).idxmax(), 'score']
+                            
+                            st.metric("Totalt mål", total_goals)
+                            st.metric("Snitt mål/match", f"{avg_goals:.1f}")
+                            st.metric("Högst målmatch", highest_score)
+                    except:
+                        st.info("Kunde inte analysera målstatistik")
+    
+    else:
+        st.warning("⚠️ Ingen matchdata tillgänglig")
+
+def show_custom_queries(db, competition, season):
+    """Custom query interface"""
+    st.header("🔍 Anpassade databasfrågor")
+    
+    st.markdown("""
+    Här kan du köra egna Cypher-frågor mot hockeydatabasen.
+    **Använd med försiktighet** - kör bara frågor du förstår.
+    """)
+    
+    # Query examples
+    st.subheader("📚 Exempel på frågor")
+    
+    examples = {
+        "Alla lag": "MATCH (t:Team) RETURN t.name, t.shortName ORDER BY t.name",
+        "Senaste matcher": f"""MATCH (g:Game)-[:PART_OF]->(s:Season {{name: '{season}'}})
+RETURN g.date, g.homeTeam, g.awayTeam, g.score 
+ORDER BY g.date DESC LIMIT 10""",
+        "Målskyttar för specifikt lag": f"""MATCH (p:Player)-[:SCORED]->(g:Goal)-[:IN_GAME]->(game:Game)-[:PART_OF]->(s:Season {{name: '{season}'}})
+MATCH (p)-[:PLAYS_FOR]->(t:Team {{name: 'Frölunda HC'}})
+RETURN p.firstName + ' ' + p.lastName AS spelare, count(g) AS mål
+ORDER BY mål DESC""",
+        "Matcher för specifikt lag": f"""MATCH (t:Team {{name: 'Frölunda HC'}})-[:PLAYED]->(g:Game)-[:PART_OF]->(s:Season {{name: '{season}'}})
+RETURN g.date, g.homeTeam, g.awayTeam, g.score
+ORDER BY g.date DESC LIMIT 10"""
     }
     
-    df_penalties = pd.DataFrame(penalty_data)
-    st.dataframe(df_penalties, use_container_width=True)
-
-def show_games(competition, season):
-    """Display game results and schedules"""
-    st.header(f"🏒 {competition} {season} Games")
+    selected_example = st.selectbox("Välj exempel:", ["Egen fråga"] + list(examples.keys()))
     
-    # Game tabs
-    gtab1, gtab2 = st.tabs(["📅 Recent Games", "🔮 Upcoming Games"])
+    # Query input
+    if selected_example == "Egen fråga":
+        query = st.text_area(
+            "Skriv din Cypher-fråga:",
+            height=100,
+            placeholder="MATCH (n) RETURN n LIMIT 10"
+        )
+    else:
+        query = st.text_area(
+            "Cypher-fråga:",
+            value=examples[selected_example],
+            height=150
+        )
     
-    with gtab1:
-        show_recent_games()
-    
-    with gtab2:
-        show_upcoming_games()
-
-def show_recent_games():
-    """Display recent game results"""
-    st.subheader("Recent Game Results")
-    
-    # Sample game data
-    games_data = {
-        "Date": ["2024-12-10", "2024-12-09", "2024-12-08", "2024-12-07", "2024-12-06"],
-        "Home Team": ["Frölunda HC", "Skellefteå AIK", "Växjö Lakers", "Färjestad BK", "Luleå HF"],
-        "Away Team": ["Linköping HC", "HV 71", "Brynäs IF", "Örebro HK", "IF Malmö Redhawks"],
-        "Score": ["4-2", "3-1", "5-3", "2-4", "1-2"],
-        "Attendance": [12500, 8900, 11200, 9800, 7600]
-    }
-    
-    df_games = pd.DataFrame(games_data)
-    st.dataframe(df_games, use_container_width=True)
-
-def show_upcoming_games():
-    """Display upcoming games"""
-    st.subheader("Upcoming Games")
-    
-    # Sample upcoming games
-    upcoming_data = {
-        "Date": ["2024-12-12", "2024-12-13", "2024-12-14", "2024-12-15", "2024-12-16"],
-        "Time": ["19:00", "18:00", "19:30", "19:00", "18:30"],
-        "Home Team": ["Brynäs IF", "Örebro HK", "IF Malmö Redhawks", "HV 71", "Växjö Lakers"],
-        "Away Team": ["Frölunda HC", "Skellefteå AIK", "Linköping HC", "Färjestad BK", "Luleå HF"],
-        "Venue": ["Gavlerinken", "Behrn Arena", "Malmö Arena", "Kinnarps Arena", "Vida Arena"]
-    }
-    
-    df_upcoming = pd.DataFrame(upcoming_data)
-    st.dataframe(df_upcoming, use_container_width=True)
-
-def show_analysis(competition, season):
-    """Display advanced analytics and comparisons"""
-    st.header(f"📈 {competition} Advanced Analysis")
-    
-    # Analysis tabs
-    atab1, atab2, atab3 = st.tabs(["📊 Team Comparison", "📈 Trends", "🎯 Performance Metrics"])
-    
-    with atab1:
-        show_team_comparison()
-    
-    with atab2:
-        show_trends_analysis()
-    
-    with atab3:
-        show_performance_metrics()
-
-def show_team_comparison():
-    """Display team comparison charts"""
-    st.subheader("Team Performance Comparison")
-    
-    # Sample comparison data
-    teams = ["Frölunda HC", "Skellefteå AIK", "Växjö Lakers", "Färjestad BK", "Luleå HF"]
-    goals_for = [156, 143, 139, 132, 128]
-    goals_against = [98, 103, 112, 118, 125]
-    
-    fig = go.Figure()
-    fig.add_trace(go.Bar(name='Goals For', x=teams, y=goals_for))
-    fig.add_trace(go.Bar(name='Goals Against', x=teams, y=goals_against))
-    
-    fig.update_layout(
-        title="Goals For vs Goals Against - Top 5 Teams",
-        xaxis_title="Team",
-        yaxis_title="Goals",
-        barmode='group'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-def show_trends_analysis():
-    """Display trends over time"""
-    st.subheader("Season Trends")
-    
-    # Sample trend data
-    weeks = list(range(1, 16))
-    frölunda_points = np.cumsum(np.random.choice([0, 1, 2, 3], 15, p=[0.1, 0.2, 0.4, 0.3]))
-    skelleftea_points = np.cumsum(np.random.choice([0, 1, 2, 3], 15, p=[0.15, 0.25, 0.35, 0.25]))
-    växjö_points = np.cumsum(np.random.choice([0, 1, 2, 3], 15, p=[0.2, 0.3, 0.3, 0.2]))
-    
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=weeks, y=frölunda_points, mode='lines+markers', name='Frölunda HC'))
-    fig.add_trace(go.Scatter(x=weeks, y=skelleftea_points, mode='lines+markers', name='Skellefteå AIK'))
-    fig.add_trace(go.Scatter(x=weeks, y=växjö_points, mode='lines+markers', name='Växjö Lakers'))
-    
-    fig.update_layout(
-        title="Points Accumulation Over Season",
-        xaxis_title="Week",
-        yaxis_title="Total Points"
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-def show_performance_metrics():
-    """Display advanced performance metrics"""
-    st.subheader("Advanced Performance Metrics")
-    
-    col1, col2 = st.columns(2)
-    
+    # Execute query
+    col1, col2 = st.columns([1, 3])
     with col1:
-        # Shot efficiency
-        teams = ["Frölunda HC", "Skellefteå AIK", "Växjö Lakers", "Färjestad BK", "Luleå HF"]
-        shot_efficiency = [12.5, 11.8, 11.2, 10.9, 10.6]
-        
-        fig = px.bar(
-            x=teams,
-            y=shot_efficiency,
-            title="Shooting Efficiency (%)",
-            labels={'x': 'Team', 'y': 'Shooting %'}
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        execute_button = st.button("▶️ Kör fråga", type="primary")
     
-    with col2:
-        # Power play efficiency
-        pp_efficiency = [23.5, 22.1, 21.8, 20.9, 19.7]
-        
-        fig = px.bar(
-            x=teams,
-            y=pp_efficiency,
-            title="Power Play Efficiency (%)",
-            labels={'x': 'Team', 'y': 'PP %'}
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    if execute_button and query.strip():
+        with st.spinner("Kör fråga..."):
+            try:
+                results = db.execute_query(query)
+                
+                if results:
+                    st.success(f"✅ Fråga lyckades! Returnerade {len(results)} rader.")
+                    
+                    # Display results
+                    st.subheader("📋 Resultat")
+                    
+                    # Convert to DataFrame if possible
+                    try:
+                        df = pd.DataFrame(results)
+                        st.dataframe(df, use_container_width=True)
+                        
+                        # Download option
+                        csv = df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Ladda ner som CSV",
+                            data=csv,
+                            file_name=f"hockey_query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                    except Exception as e:
+                        # If DataFrame conversion fails, show as JSON
+                        st.json(results)
+                        st.info(f"Kunde inte konvertera till tabell: {e}")
+                
+                else:
+                    st.warning("⚠️ Frågan returnerade inga resultat")
+                    
+            except Exception as e:
+                st.error(f"❌ Fel vid körning av fråga: {e}")
+    
+    elif execute_button:
+        st.warning("⚠️ Skriv en fråga först")
 
 if __name__ == "__main__":
     main()

@@ -83,7 +83,6 @@ class Neo4jHockeyDatabase:
             with self.driver.session() as session:
                 session.run("RETURN 1")
             self.connected = True
-            st.success("✅ Ansluten till Neo4j databas!")
         except Exception as e:
             st.error(f"❌ Kunde inte ansluta till Neo4j databas: {e}")
             st.info("🔧 Kontrollera din .env fil med rätt NEO4J_URI, NEO4J_USER och NEO4J_PASSWORD")
@@ -433,8 +432,13 @@ def show_standings(db, competition, season):
             else:
                 return [''] * len(row)
         
-        styled_df = display_df.style.apply(highlight_positions, axis=1)
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        # Apply styling without matplotlib dependency
+        try:
+            styled_df = display_df.style.apply(highlight_positions, axis=1)
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        except:
+            # Fallback without styling if matplotlib is not available
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
         
         # League insights
         st.markdown("---")
