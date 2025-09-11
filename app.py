@@ -71,7 +71,7 @@ class Neo4jHockeyDatabase:
     def __init__(self):
         """Initialize Neo4j connection"""
         self.uri = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
-        self.user = os.getenv('NEO4J_USER', 'neo4j')
+        self.user = os.getenv('NEO4J_USERNAME', 'neo4j')
         self.password = os.getenv('NEO4J_PASSWORD', '')
         
         self.driver = None
@@ -309,7 +309,7 @@ def main():
         st.rerun()
     
     # Main content tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "🏆 Lag", "👤 Spelare", "🏒 Matcher", "🔍 Frågor"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🏆 Lag", "👤 Spelare", "🏒 Matcher"])
     
     with tab1:
         show_dashboard(db, selected_competition, selected_season)
@@ -322,9 +322,6 @@ def main():
     
     with tab4:
         show_games(db, selected_competition, selected_season)
-    
-    with tab5:
-        show_custom_queries(db, selected_competition, selected_season)
     
     # Clean up
     db.close()
@@ -732,91 +729,6 @@ def show_games(db, competition, season):
     
     else:
         st.warning("⚠️ Ingen matchdata tillgänglig")
-
-def show_custom_queries(db, competition, season):
-    """Custom query interface"""
-    st.header("🔍 Anpassade databasfrågor")
-    
-    st.markdown("""
-    Här kan du köra egna Cypher-frågor mot hockeydatabasen.
-    **Använd med försiktighet** - kör bara frågor du förstår.
-    """)
-    
-    # Query examples
-    st.subheader("📚 Exempel på frågor")
-    
-    examples = {
-        "Alla lag": "MATCH (t:Team) RETURN t.name, t.shortName ORDER BY t.name",
-        "Senaste matcher": f"""MATCH (g:Game)-[:PART_OF]->(s:Season {{name: '{season}'}})
-RETURN g.date, g.homeTeam, g.awayTeam, g.score 
-ORDER BY g.date DESC LIMIT 10""",
-        "Målskyttar för specifikt lag": f"""MATCH (p:Player)-[:SCORED]->(g:Goal)-[:IN_GAME]->(game:Game)-[:PART_OF]->(s:Season {{name: '{season}'}})
-MATCH (p)-[:PLAYS_FOR]->(t:Team {{name: 'Frölunda HC'}})
-RETURN p.firstName + ' ' + p.lastName AS spelare, count(g) AS mål
-ORDER BY mål DESC""",
-        "Matcher för specifikt lag": f"""MATCH (t:Team {{name: 'Frölunda HC'}})-[:PLAYED]->(g:Game)-[:PART_OF]->(s:Season {{name: '{season}'}})
-RETURN g.date, g.homeTeam, g.awayTeam, g.score
-ORDER BY g.date DESC LIMIT 10"""
-    }
-    
-    selected_example = st.selectbox("Välj exempel:", ["Egen fråga"] + list(examples.keys()))
-    
-    # Query input
-    if selected_example == "Egen fråga":
-        query = st.text_area(
-            "Skriv din Cypher-fråga:",
-            height=100,
-            placeholder="MATCH (n) RETURN n LIMIT 10"
-        )
-    else:
-        query = st.text_area(
-            "Cypher-fråga:",
-            value=examples[selected_example],
-            height=150
-        )
-    
-    # Execute query
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        execute_button = st.button("▶️ Kör fråga", type="primary")
-    
-    if execute_button and query.strip():
-        with st.spinner("Kör fråga..."):
-            try:
-                results = db.execute_query(query)
-                
-                if results:
-                    st.success(f"✅ Fråga lyckades! Returnerade {len(results)} rader.")
-                    
-                    # Display results
-                    st.subheader("📋 Resultat")
-                    
-                    # Convert to DataFrame if possible
-                    try:
-                        df = pd.DataFrame(results)
-                        st.dataframe(df, use_container_width=True)
-                        
-                        # Download option
-                        csv = df.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Ladda ner som CSV",
-                            data=csv,
-                            file_name=f"hockey_query_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv"
-                        )
-                    except Exception as e:
-                        # If DataFrame conversion fails, show as JSON
-                        st.json(results)
-                        st.info(f"Kunde inte konvertera till tabell: {e}")
-                
-                else:
-                    st.warning("⚠️ Frågan returnerade inga resultat")
-                    
-            except Exception as e:
-                st.error(f"❌ Fel vid körning av fråga: {e}")
-    
-    elif execute_button:
-        st.warning("⚠️ Skriv en fråga först")
 
 if __name__ == "__main__":
     main()
