@@ -11,7 +11,7 @@ from neo4j import GraphDatabase
 import time
 import logging
 
-# Ladda miljövariabler från .env-filen
+# Load environment variables from .env file
 load_dotenv()
 
 # Configure the page
@@ -84,8 +84,8 @@ class Neo4jHockeyDatabase:
                 session.run("RETURN 1")
             self.connected = True
         except Exception as e:
-            st.error(f"❌ Kunde inte ansluta till Neo4j databas: {e}")
-            st.info("🔧 Kontrollera din .env fil med rätt NEO4J_URI, NEO4J_USER och NEO4J_PASSWORD")
+            st.error(f"❌ Could not connect to Neo4j database: {e}")
+            st.info("🔧 Check your .env file with correct NEO4J_URI, NEO4J_USER and NEO4J_PASSWORD")
     
     def close(self):
         """Close the database connection"""
@@ -102,7 +102,7 @@ class Neo4jHockeyDatabase:
                 result = session.run(query, parameters or {})
                 return [record.data() for record in result]
         except Exception as e:
-            st.error(f"Databasfel: {e}")
+            st.error(f"Database error: {e}")
             return []
     
     @st.cache_data(ttl=600)
@@ -267,13 +267,13 @@ def main():
     
     # Connection status
     if db.connected:
-        st.markdown('<div class="connection-status">🔗 Ansluten till Neo4j databas</div>', unsafe_allow_html=True)
+        st.markdown('<div class="connection-status">🔗 Connected to Neo4j database</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="error-status">❌ Ingen databasanslutning</div>', unsafe_allow_html=True)
+        st.markdown('<div class="error-status">❌ No database connection</div>', unsafe_allow_html=True)
         st.stop()
     
     # Sidebar for filters
-    st.sidebar.header("🔧 Filter")
+    st.sidebar.header("🔧 Filters")
     
     # Get data for filters
     competitions = db.get_competitions()
@@ -281,35 +281,35 @@ def main():
     teams = db.get_teams()
     
     # Filter controls
-    selected_competition = st.sidebar.selectbox("Tävling", competitions, index=0)
-    selected_season = st.sidebar.selectbox("Säsong", seasons, index=0)
+    selected_competition = st.sidebar.selectbox("Competition", competitions, index=0)
+    selected_season = st.sidebar.selectbox("Season", seasons, index=0)
     
     # Display current selection
     st.sidebar.markdown("---")
-    st.sidebar.markdown(f"**Aktuellt val:**")
+    st.sidebar.markdown(f"**Current Selection:**")
     st.sidebar.markdown(f"🏆 {selected_competition}")
     st.sidebar.markdown(f"📅 {selected_season}")
     
     # Database info
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**Databasinfo:**")
+    st.sidebar.markdown("**Database Info:**")
     db_info = db.get_database_info()
     if db_info:
-        st.sidebar.markdown(f"🏒 {db_info.get('teams', 0)} lag")
-        st.sidebar.markdown(f"👤 {db_info.get('players', 0)} spelare")
-        st.sidebar.markdown(f"🎮 {db_info.get('games', 0)} matcher")
-        st.sidebar.markdown(f"⚽ {db_info.get('goals', 0)} mål")
-        st.sidebar.markdown(f"⚠️ {db_info.get('penalties', 0)} utvisningar")
+        st.sidebar.markdown(f"🏒 {db_info.get('teams', 0)} teams")
+        st.sidebar.markdown(f"👤 {db_info.get('players', 0)} players")
+        st.sidebar.markdown(f"🎮 {db_info.get('games', 0)} games")
+        st.sidebar.markdown(f"⚽ {db_info.get('goals', 0)} goals")
+        st.sidebar.markdown(f"⚠️ {db_info.get('penalties', 0)} penalties")
     
     # Cache controls
     st.sidebar.markdown("---")
-    if st.sidebar.button("🔄 Uppdatera cache"):
+    if st.sidebar.button("🔄 Update cache"):
         st.cache_data.clear()
-        st.success("Cache uppdaterad!")
+        st.success("Cache updated!")
         st.rerun()
     
     # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🏆 Lag", "👤 Spelare", "🏒 Matcher"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🏆 Teams", "👤 Players", "🏒 Games"])
     
     with tab1:
         show_dashboard(db, selected_competition, selected_season)
@@ -346,16 +346,16 @@ def show_dashboard(db, competition, season):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("🏒 Lag", total_teams)
+            st.metric("🏒 Teams", total_teams)
         
         with col2:
-            st.metric("🎮 Totalt matcher", f"{total_games:,}")
+            st.metric("🎮 Total games", f"{total_games:,}")
         
         with col3:
-            st.metric("⚽ Totalt mål", f"{total_goals:,}")
+            st.metric("⚽ Total goals", f"{total_goals:,}")
         
         with col4:
-            st.metric("📈 Snitt mål/match", f"{avg_goals_per_game:.2f}")
+            st.metric("📈 Avg goals/game", f"{avg_goals_per_game:.2f}")
         
         st.markdown("---")
         
@@ -363,36 +363,36 @@ def show_dashboard(db, competition, season):
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("🥅 Bästa målskyttelagen")
+            st.subheader("🥅 Top scoring teams")
             top_teams = df.head(6)
             fig = px.bar(
                 x=top_teams['goals_for'],
                 y=top_teams['team'],
                 orientation='h',
-                title="Mål gjorda denna säsong",
-                labels={'x': 'Mål', 'y': 'Lag'}
+                title="Goals scored this season",
+                labels={'x': 'Goals', 'y': 'Team'}
             )
             fig.update_layout(showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            st.subheader("🏆 Poängtabell (topp 6)")
+            st.subheader("🏆 Standings (top 6)")
             standings_table = top_teams[['team', 'points', 'wins', 'losses', 'goals_for', 'goals_against']]
-            standings_table.columns = ['Lag', 'Poäng', 'Vinster', 'Förluster', 'Mål för', 'Mål emot']
+            standings_table.columns = ['Team', 'Points', 'Wins', 'Losses', 'Goals For', 'Goals Against']
             st.dataframe(standings_table, use_container_width=True, hide_index=True)
     
     else:
-        st.warning("⚠️ Ingen data tillgänglig för valda tävling och säsong.")
+        st.warning("⚠️ No data available for selected competition and season.")
 
 def show_teams(db, competition, season, teams):
     """Display team statistics"""
-    st.header(f"🏆 {competition} {season} Lagstatistik")
+    st.header(f"🏆 {competition} {season} Team Statistics")
     
     # Team selector
-    team_options = ["📊 Alla lag (Tabell)"] + [f"🏒 {team['name']}" for team in teams]
-    selected_option = st.selectbox("Välj vy:", team_options)
+    team_options = ["📊 All teams (Table)"] + [f"🏒 {team['name']}" for team in teams]
+    selected_option = st.selectbox("Select view:", team_options)
     
-    if selected_option == "📊 Alla lag (Tabell)":
+    if selected_option == "📊 All teams (Table)":
         show_standings(db, competition, season)
     else:
         team_name = selected_option.replace("🏒 ", "")
@@ -400,7 +400,7 @@ def show_teams(db, competition, season, teams):
 
 def show_standings(db, competition, season):
     """Display full standings table"""
-    st.subheader("📊 Fullständig tabell")
+    st.subheader("📊 Full standings")
     
     standings = db.get_standings(competition, season)
     
@@ -418,7 +418,7 @@ def show_standings(db, competition, season):
                         'goals_for', 'goals_against', 'goal_diff', 'points', 
                         'points_per_game', 'win_percentage']].copy()
         
-        display_df.columns = ['Pos', 'Lag', 'M', 'V', 'F', 'GM', 'IM', 'MS', 'P', 'P/M', 'V%']
+        display_df.columns = ['Pos', 'Team', 'GP', 'W', 'L', 'GF', 'GA', 'GD', 'P', 'P/GP', 'W%']
         
         # Style based on position
         def highlight_positions(row):
@@ -442,35 +442,35 @@ def show_standings(db, competition, season):
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.subheader("🥇 Ligaledare")
+            st.subheader("🥇 League leaders")
             leader = df.iloc[0]
-            st.markdown(f"**Flest poäng:** {leader['team']} ({leader['points']} p)")
+            st.markdown(f"**Most points:** {leader['team']} ({leader['points']} p)")
             
             best_offense = df.loc[df['goals_for'].idxmax()]
-            st.markdown(f"**Bästa anfall:** {best_offense['team']} ({best_offense['goals_for']} mål)")
+            st.markdown(f"**Best offense:** {best_offense['team']} ({best_offense['goals_for']} goals)")
             
             best_defense = df.loc[df['goals_against'].idxmin()]
-            st.markdown(f"**Bästa försvar:** {best_defense['team']} ({best_defense['goals_against']} insläppta)")
+            st.markdown(f"**Best defense:** {best_defense['team']} ({best_defense['goals_against']} allowed)")
         
         with col2:
-            st.subheader("📊 Genomsnitt")
-            st.markdown(f"**Snitt poäng:** {df['points'].mean():.1f}")
-            st.markdown(f"**Snitt mål för:** {df['goals_for'].mean():.1f}")
-            st.markdown(f"**Snitt mål emot:** {df['goals_against'].mean():.1f}")
+            st.subheader("📊 Averages")
+            st.markdown(f"**Avg points:** {df['points'].mean():.1f}")
+            st.markdown(f"**Avg goals for:** {df['goals_for'].mean():.1f}")
+            st.markdown(f"**Avg goals against:** {df['goals_against'].mean():.1f}")
         
         with col3:
-            st.subheader("🎯 Spännande fakta")
+            st.subheader("🎯 Interesting facts")
             if len(df) >= 2:
                 gap = df.iloc[0]['points'] - df.iloc[1]['points']
-                st.markdown(f"**Ledargap:** {gap} poäng")
+                st.markdown(f"**Leader gap:** {gap} points")
                 
                 # Playoff line analysis
                 if len(df) >= 6:
                     playoff_gap = df.iloc[5]['points'] - df.iloc[6]['points'] if len(df) > 6 else 0
-                    st.markdown(f"**Slutspelsstrid:** {playoff_gap} poäng gap")
+                    st.markdown(f"**Playoff race:** {playoff_gap} points gap")
     
     else:
-        st.error("❌ Kunde inte ladda tabelldata")
+        st.error("❌ Could not load standings data")
 
 def show_team_details(db, team_name, competition, season):
     """Display individual team details"""
@@ -488,52 +488,52 @@ def show_team_details(db, team_name, competition, season):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Spelade matcher", team_stats['games'])
-            st.metric("Vinster", team_stats['wins'])
+            st.metric("Games played", team_stats['games'])
+            st.metric("Wins", team_stats['wins'])
         
         with col2:
-            st.metric("Förluster", team_stats['losses'])
-            st.metric("Poäng", team_stats['points'])
+            st.metric("Losses", team_stats['losses'])
+            st.metric("Points", team_stats['points'])
         
         with col3:
-            st.metric("Mål för", team_stats['goals_for'])
-            st.metric("Mål emot", team_stats['goals_against'])
+            st.metric("Goals for", team_stats['goals_for'])
+            st.metric("Goals against", team_stats['goals_against'])
         
         with col4:
-            st.metric("Målskillnad", f"+{goal_diff}" if goal_diff >= 0 else str(goal_diff))
-            st.metric("Poäng/match", f"{ppg:.2f}")
+            st.metric("Goal difference", f"+{goal_diff}" if goal_diff >= 0 else str(goal_diff))
+            st.metric("Points/game", f"{ppg:.2f}")
         
         # Performance charts
         st.markdown("---")
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("📊 Vinst/Förlust fördelning")
+            st.subheader("📊 Win/Loss distribution")
             fig = px.pie(
                 values=[team_stats['wins'], team_stats['losses']],
-                names=['Vinster', 'Förluster'],
-                title="Matchresultat"
+                names=['Wins', 'Losses'],
+                title="Match results"
             )
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            st.subheader("⚽ Mål jämförelse")
+            st.subheader("⚽ Goals comparison")
             fig = px.bar(
-                x=['Mål för', 'Mål emot'],
+                x=['Goals for', 'Goals against'],
                 y=[team_stats['goals_for'], team_stats['goals_against']],
-                title="Offensiv vs Defensiv"
+                title="Offense vs Defense"
             )
             st.plotly_chart(fig, use_container_width=True)
     
     else:
-        st.error(f"❌ Kunde inte ladda statistik för {team_name}")
+        st.error(f"❌ Could not load statistics for {team_name}")
 
 def show_players(db, competition, season):
     """Display player statistics"""
-    st.header(f"👤 {competition} {season} Spelarstatistik")
+    st.header(f"👤 {competition} {season} Player Statistics")
     
     # Player stats tabs
-    tab1, tab2, tab3 = st.tabs(["🥅 Målskyttar", "🎯 Passningsgivare", "⚠️ Utvisningar"])
+    tab1, tab2, tab3 = st.tabs(["🥅 Goal Scorers", "🎯 Assist Leaders", "⚠️ Penalties"])
     
     with tab1:
         show_player_goals(db, competition, season)
@@ -546,9 +546,9 @@ def show_players(db, competition, season):
 
 def show_player_goals(db, competition, season):
     """Display top goal scorers"""
-    st.subheader("🥅 Bästa målskyttarna")
+    st.subheader("🥅 Top goal scorers")
     
-    limit = st.slider("Antal spelare att visa:", 5, 50, 15)
+    limit = st.slider("Number of players to show:", 5, 50, 15)
     
     scorers = db.get_top_scorers(competition, season, limit)
     
@@ -559,32 +559,32 @@ def show_player_goals(db, competition, season):
         
         # Display table
         display_df = df[['rank', 'player', 'team', 'goals', 'games', 'goals_per_game']].copy()
-        display_df.columns = ['Rank', 'Spelare', 'Lag', 'Mål', 'Matcher', 'Mål/match']
+        display_df.columns = ['Rank', 'Player', 'Team', 'Goals', 'Games', 'Goals/game']
         
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         
         # Top 10 chart
         if len(df) >= 5:
-            st.subheader("📊 Topp 10 målskyttar")
+            st.subheader("📊 Top 10 goal scorers")
             top_10 = df.head(10)
             fig = px.bar(
                 x=top_10['goals'],
                 y=top_10['player'],
                 orientation='h',
-                title="Mål denna säsong",
-                labels={'x': 'Mål', 'y': 'Spelare'}
+                title="Goals this season",
+                labels={'x': 'Goals', 'y': 'Player'}
             )
             fig.update_layout(showlegend=False, height=400)
             st.plotly_chart(fig, use_container_width=True)
     
     else:
-        st.warning("⚠️ Ingen målskytte-data tillgänglig")
+        st.warning("⚠️ No goal scoring data available")
 
 def show_player_assists(db, competition, season):
     """Display top assist providers"""
-    st.subheader("🎯 Bästa passningsgivarna")
+    st.subheader("🎯 Top assist leaders")
     
-    limit = st.slider("Antal spelare att visa:", 5, 50, 15, key="assists_limit")
+    limit = st.slider("Number of players to show:", 5, 50, 15, key="assists_limit")
     
     assists = db.get_top_assists(competition, season, limit)
     
@@ -595,32 +595,32 @@ def show_player_assists(db, competition, season):
         
         # Display table
         display_df = df[['rank', 'player', 'team', 'assists', 'games', 'assists_per_game']].copy()
-        display_df.columns = ['Rank', 'Spelare', 'Lag', 'Assist', 'Matcher', 'Assist/match']
+        display_df.columns = ['Rank', 'Player', 'Team', 'Assists', 'Games', 'Assists/game']
         
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         
         # Top 10 chart
         if len(df) >= 5:
-            st.subheader("📊 Topp 10 passningsgivare")
+            st.subheader("📊 Top 10 assist leaders")
             top_10 = df.head(10)
             fig = px.bar(
                 x=top_10['assists'],
                 y=top_10['player'],
                 orientation='h',
-                title="Assists denna säsong",
-                labels={'x': 'Assists', 'y': 'Spelare'}
+                title="Assists this season",
+                labels={'x': 'Assists', 'y': 'Player'}
             )
             fig.update_layout(showlegend=False, height=400)
             st.plotly_chart(fig, use_container_width=True)
     
     else:
-        st.warning("⚠️ Ingen assist-data tillgänglig")
+        st.warning("⚠️ No assist data available")
 
 def show_player_penalties(db, competition, season):
     """Display penalty leaders"""
-    st.subheader("⚠️ Mest utvisade spelarna")
+    st.subheader("⚠️ Most penalized players")
     
-    limit = st.slider("Antal spelare att visa:", 5, 50, 15, key="penalty_limit")
+    limit = st.slider("Number of players to show:", 5, 50, 15, key="penalty_limit")
     
     penalties = db.get_penalty_leaders(competition, season, limit)
     
@@ -631,13 +631,13 @@ def show_player_penalties(db, competition, season):
         
         # Display table
         display_df = df[['rank', 'player', 'team', 'penalties', 'penalty_minutes', 'games', 'penalties_per_game']].copy()
-        display_df.columns = ['Rank', 'Spelare', 'Lag', 'Utvisningar', 'Utv.min', 'Matcher', 'Utv/match']
+        display_df.columns = ['Rank', 'Player', 'Team', 'Penalties', 'PIM', 'Games', 'PEN/game']
         
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         
         # Top 10 chart
         if len(df) >= 5:
-            st.subheader("📊 Topp 10 mest utvisade")
+            st.subheader("📊 Top 10 most penalized")
             top_10 = df.head(10)
             
             col1, col2 = st.columns(2)
@@ -647,8 +647,8 @@ def show_player_penalties(db, competition, season):
                     x=top_10['penalties'],
                     y=top_10['player'],
                     orientation='h',
-                    title="Antal utvisningar",
-                    labels={'x': 'Utvisningar', 'y': 'Spelare'}
+                    title="Number of penalties",
+                    labels={'x': 'Penalties', 'y': 'Player'}
                 )
                 fig.update_layout(showlegend=False, height=400)
                 st.plotly_chart(fig, use_container_width=True)
@@ -658,20 +658,20 @@ def show_player_penalties(db, competition, season):
                     x=top_10['penalty_minutes'],
                     y=top_10['player'],
                     orientation='h',
-                    title="Utvisningsminuter",
-                    labels={'x': 'Minuter', 'y': 'Spelare'}
+                    title="Penalty minutes",
+                    labels={'x': 'Minutes', 'y': 'Player'}
                 )
                 fig.update_layout(showlegend=False, height=400)
                 st.plotly_chart(fig, use_container_width=True)
     
     else:
-        st.warning("⚠️ Ingen utvisnings-data tillgänglig")
+        st.warning("⚠️ No penalty data available")
 
 def show_games(db, competition, season):
     """Display recent games"""
-    st.header(f"🏒 {competition} {season} Matcher")
+    st.header(f"🏒 {competition} {season} Games")
     
-    limit = st.slider("Antal matcher att visa:", 5, 50, 20)
+    limit = st.slider("Number of games to show:", 5, 50, 20)
     
     games = db.get_recent_games(competition, season, limit)
     
@@ -680,11 +680,11 @@ def show_games(db, competition, season):
         
         # Format the display
         display_df = df[['date', 'home_team', 'away_team', 'score', 'spectators']].copy()
-        display_df.columns = ['Datum', 'Hemmalag', 'Bortalag', 'Resultat', 'Åskådare']
+        display_df.columns = ['Date', 'Home Team', 'Away Team', 'Score', 'Attendance']
         
         # Format attendance
         if 'spectators' in df.columns:
-            display_df['Åskådare'] = display_df['Åskådare'].apply(
+            display_df['Attendance'] = display_df['Attendance'].apply(
                 lambda x: f"{int(x):,}" if pd.notnull(x) and x != 0 else "N/A"
             )
         
@@ -696,9 +696,9 @@ def show_games(db, competition, season):
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("📊 Matchstatistik")
+                st.subheader("📊 Game statistics")
                 total_games = len(df)
-                st.metric("Visade matcher", total_games)
+                st.metric("Games shown", total_games)
                 
                 if 'spectators' in df.columns:
                     valid_attendance = df['spectators'].dropna()
@@ -706,11 +706,11 @@ def show_games(db, competition, season):
                     if len(valid_attendance) > 0:
                         avg_attendance = valid_attendance.mean()
                         max_attendance = valid_attendance.max()
-                        st.metric("Snitt åskådare", f"{avg_attendance:,.0f}")
-                        st.metric("Högsta åskådarantal", f"{max_attendance:,}")
+                        st.metric("Avg attendance", f"{avg_attendance:,.0f}")
+                        st.metric("Highest attendance", f"{max_attendance:,}")
             
             with col2:
-                st.subheader("⚽ Målstatistik")
+                st.subheader("⚽ Goal statistics")
                 if 'score' in df.columns:
                     try:
                         # Parse scores to calculate goal statistics
@@ -721,14 +721,14 @@ def show_games(db, competition, season):
                             avg_goals = total_goals / len(df)
                             highest_score = df.loc[scores.sum(axis=1).idxmax(), 'score']
                             
-                            st.metric("Totalt mål", total_goals)
-                            st.metric("Snitt mål/match", f"{avg_goals:.1f}")
-                            st.metric("Högst målmatch", highest_score)
+                            st.metric("Total goals", total_goals)
+                            st.metric("Avg goals/game", f"{avg_goals:.1f}")
+                            st.metric("Highest scoring game", highest_score)
                     except:
-                        st.info("Kunde inte analysera målstatistik")
+                        st.info("Could not analyze goal statistics")
     
     else:
-        st.warning("⚠️ Ingen matchdata tillgänglig")
+        st.warning("⚠️ No game data available")
 
 if __name__ == "__main__":
     main()
