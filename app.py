@@ -141,8 +141,9 @@ class Neo4jHockeyDatabase:
         MATCH (s)-[:PART_OF]->(c:Competition {name: $competition})
         RETURN t.name AS team,
                count(g) AS games,
-               sum(CASE WHEN rel.result = 'W' THEN 1 ELSE 0 END) AS wins,
-               sum(CASE WHEN rel.result = 'L' THEN 1 ELSE 0 END) AS losses,
+               sum(rel.win) AS wins,
+               sum(rel.lost) AS losses,
+               sum(rel.draw) AS draws,
                sum(rel.goalsFor) AS goals_for,
                sum(rel.goalsAgainst) AS goals_against,
                sum(rel.points) AS points
